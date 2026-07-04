@@ -47,6 +47,39 @@ def _ensure_legacy_columns(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE diet_runs ADD COLUMN replayed_from_run_id TEXT")
 
 
+def _ensure_chat_tables(conn: sqlite3.Connection) -> None:
+    """修复早期 chat_messages 错误外键，保留已有消息数据。"""
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='chat_messages'"
+    ).fetchone()
+    if not row or not row[0] or "REFERENCES chat_sessions (id)" not in row[0]:
+        return
+
+    logger.warning("检测到 chat_messages 旧外键，执行非破坏性迁移（保留数据）")
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS chat_messages_migrated (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL,
+            role TEXT NOT NULL,
+            content TEXT NOT NULL,
+            attachment_name TEXT,
+            trace_json TEXT,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (session_id) REFERENCES chat_sessions (session_id)
+        );
+        INSERT OR IGNORE INTO chat_messages_migrated
+            (id, session_id, role, content, attachment_name, trace_json, created_at)
+        SELECT id, session_id, role, content, attachment_name, trace_json, created_at
+        FROM chat_messages;
+        DROP TABLE chat_messages;
+        ALTER TABLE chat_messages_migrated RENAME TO chat_messages;
+        CREATE INDEX IF NOT EXISTS idx_chat_messages_session_created
+        ON chat_messages (session_id, created_at ASC);
+        """
+    )
+
+
 def init_db() -> None:
     """创建表与索引（幂等）。"""
     with _connect() as conn:
@@ -105,9 +138,37 @@ def init_db() -> None:
 
             CREATE INDEX IF NOT EXISTS idx_diet_reflect_user_created
             ON diet_reflect (user_id, created_at DESC);
+
+            CREATE TABLE IF NOT EXISTS chat_sessions (
+                session_id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                last_report_task_id TEXT,
+                meta_json TEXT NOT NULL DEFAULT '{}',
+                FOREIGN KEY (user_id) REFERENCES users (user_id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_chat_sessions_user_updated
+            ON chat_sessions (user_id, updated_at DESC);
+
+            CREATE TABLE IF NOT EXISTS chat_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                attachment_name TEXT,
+                trace_json TEXT,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (session_id) REFERENCES chat_sessions (session_id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_chat_messages_session_created
+            ON chat_messages (session_id, created_at ASC);
             """
         )
         _ensure_legacy_columns(conn)
+        _ensure_chat_tables(conn)
         conn.commit()
     logger.info("SQLite 记忆库已就绪: %s", get_db_path())
 
@@ -477,3 +538,151 @@ def list_user_memory_chunks_sql(user_id: str, limit: int = 50) -> List[Dict[str,
             )
     out.sort(key=lambda x: x.get("created_at", ""), reverse=True)
     return out[:limit]
+
+
+# ---------- 健康助手对话会话 ----------
+
+
+def create_chat_session(user_id: str, session_id: str) -> Dict[str, Any]:
+    ensure_user(user_id)
+    now = datetime.now(timezone.utc).isoformat()
+    with _connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO chat_sessions (session_id, user_id, created_at, updated_at, meta_json)
+            VALUES (?, ?, ?, ?, '{}')
+            """,
+            (session_id, user_id, now, now),
+        )
+        conn.commit()
+    return {"session_id": session_id, "user_id": user_id, "created_at": now}
+
+
+def get_chat_session(session_id: str) -> Optional[Dict[str, Any]]:
+    with _connect() as conn:
+        row = conn.execute(
+            """
+            SELECT session_id, user_id, created_at, updated_at, last_report_task_id, meta_json
+            FROM chat_sessions WHERE session_id = ?
+            """,
+            (session_id,),
+        ).fetchone()
+    if not row:
+        return None
+    d = dict(row)
+    try:
+        d["meta"] = json.loads(d.pop("meta_json") or "{}")
+    except json.JSONDecodeError:
+        d["meta"] = {}
+    return d
+
+
+def touch_chat_session(session_id: str, *, last_report_task_id: Optional[str] = None) -> None:
+    now = datetime.now(timezone.utc).isoformat()
+    with _connect() as conn:
+        if last_report_task_id:
+            conn.execute(
+                """
+                UPDATE chat_sessions SET updated_at = ?, last_report_task_id = ?
+                WHERE session_id = ?
+                """,
+                (now, last_report_task_id, session_id),
+            )
+        else:
+            conn.execute(
+                "UPDATE chat_sessions SET updated_at = ? WHERE session_id = ?",
+                (now, session_id),
+            )
+        conn.commit()
+
+
+def append_chat_message(
+    session_id: str,
+    role: str,
+    content: str,
+    *,
+    attachment_name: Optional[str] = None,
+    trace: Optional[Dict[str, Any]] = None,
+) -> int:
+    now = datetime.now(timezone.utc).isoformat()
+    trace_json = json.dumps(trace, ensure_ascii=False) if trace else None
+    with _connect() as conn:
+        cur = conn.execute(
+            """
+            INSERT INTO chat_messages (session_id, role, content, attachment_name, trace_json, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (session_id, role, content, attachment_name, trace_json, now),
+        )
+        conn.execute(
+            "UPDATE chat_sessions SET updated_at = ? WHERE session_id = ?",
+            (now, session_id),
+        )
+        conn.commit()
+        return int(cur.lastrowid)
+
+
+def list_chat_messages(session_id: str, limit: int = 100) -> List[Dict[str, Any]]:
+    limit = max(1, min(limit, 500))
+    with _connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, role, content, attachment_name, trace_json, created_at
+            FROM chat_messages
+            WHERE session_id = ?
+            ORDER BY created_at ASC
+            LIMIT ?
+            """,
+            (session_id, limit),
+        ).fetchall()
+    out: List[Dict[str, Any]] = []
+    for r in rows:
+        d = dict(r)
+        raw = d.pop("trace_json", None)
+        if raw:
+            try:
+                d["trace"] = json.loads(raw)
+            except json.JSONDecodeError:
+                d["trace"] = None
+        out.append(d)
+    return out
+
+
+def list_recent_chat_messages_for_user(user_id: str, limit: int = 40) -> List[Dict[str, Any]]:
+    """用户最近对话消息（跨会话，按时间倒序）。"""
+    limit = max(1, min(limit, 200))
+    with _connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT m.id, m.session_id, m.role, m.content, m.attachment_name, m.created_at
+            FROM chat_messages m
+            INNER JOIN chat_sessions s ON s.session_id = m.session_id
+            WHERE s.user_id = ?
+            ORDER BY m.created_at DESC
+            LIMIT ?
+            """,
+            (user_id, limit),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def list_chat_sessions_for_user(user_id: str, limit: int = 30) -> List[Dict[str, Any]]:
+    """用户会话列表（按更新时间倒序，含首条用户消息预览）。"""
+    limit = max(1, min(limit, 100))
+    with _connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT s.session_id, s.created_at, s.updated_at, s.last_report_task_id,
+                   (
+                       SELECT content FROM chat_messages
+                       WHERE session_id = s.session_id AND role = 'user'
+                       ORDER BY created_at ASC LIMIT 1
+                   ) AS preview
+            FROM chat_sessions s
+            WHERE s.user_id = ?
+            ORDER BY s.updated_at DESC
+            LIMIT ?
+            """,
+            (user_id, limit),
+        ).fetchall()
+    return [dict(r) for r in rows]

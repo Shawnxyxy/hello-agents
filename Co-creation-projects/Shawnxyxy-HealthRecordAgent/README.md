@@ -1,8 +1,36 @@
-# HealthRecordAgent · 健康档案助手
+# HealthRecordAgent · 健康助手
 
-基于 **HelloAgents**（`HelloAgentsLLM`）与 **FastAPI** 的多智能体应用：体检报告解读、饮食推荐与执行反馈闭环，可选 **Milvus 语义检索 + SQLite** 长期记忆。
+基于 **HelloAgents**（`HelloAgentsLLM`）与 **FastAPI** 的多智能体应用：**对话为主入口**的「健康助手」，支持对话内上传体检报告、Skills-Agent 两层编排与 Harness 安全审查；并保留档案分析、饮食推荐与执行反馈闭环，可选 **Milvus 语义检索 + SQLite** 长期记忆。
 
 > **声明**：本项目输出仅供健康信息与流程演示，**不能替代**执业医师的诊断或处方。
+
+---
+
+## 架构概览
+
+```
+用户 ──► 健康助手对话 (SSE) ──► Orchestrator
+                                    │
+                    ┌───────────────┼───────────────┐
+                    ▼               ▼               ▼
+              report_analysis   Agent Swarm      diet_recommend
+              (附件/报告)    memory / RAG / trend   (饮食关键词)
+                    │               │               │
+                    └───────────────┴───────────────┘
+                                    ▼
+                              LLM 汇总回复
+                                    ▼
+                           Harness (safety_guard)
+                                    ▼
+                              流式 token + done
+```
+
+| 层级 | 职责 |
+|------|------|
+| **Orchestrator** | 规则路由 Skill、SSE 进度、会话持久化 |
+| **Skills** | `report_analysis` / `memory_retrieve` / `guideline_rag` / `trend_compare` / `diet_recommend` / `safety_guard` |
+| **Harness** | 高危症状拦截、禁止诊断/剂量输出、免责声明；`evals/safety_cases.json` + CI |
+| **Swarm** | `memory_retrieve`、`guideline_rag`、`trend_compare` 并行执行 |
 
 ---
 
@@ -28,20 +56,23 @@
 
 | 模块 | 说明 |
 |------|------|
+| **健康助手（对话）** | 默认 Tab；SSE 流式对话；支持附件上传 PDF/文本报告；追问自动加载上次报告上下文 |
 | **档案分析** | 文本或 PDF 体检报告 → 多 Agent 流水线（规划 → 指标 → 风险 → 建议 → 报告），异步任务可轮询状态 |
 | **饮食助手** | 自然语言 **今日饮食日志** → LLM 解析与营养汇总 → 营养师 / 教练 / 习惯 多阶段结构化输出；结合历史记忆与 Reflect 反馈 |
-| **长期记忆** | SQLite 存运行记录与反馈；可选 Milvus 向量索引 + Hybrid 检索（失败回退 SQL 列表） |
+| **趋势分析** | 历史报告对比与趋势 Skill；`GET /api/health/users/{user_id}/trend_analysis` |
+| **长期记忆** | SQLite 存运行记录、对话会话与反馈；可选 Milvus 向量索引 + Hybrid 检索（失败回退 SQL 列表） |
 | **可观测** | `pipeline_trace`、`errors` / `degraded`、`rag_debug`；报告/饮食 run 的 observability 接口与饮食 **replay** |
-| **前端** | 静态页 + Tab（档案分析 \| 饮食助手 \| 历史）；类 Apple Health 信息层级；**开发者模式**控制技术细节展示；饮食 **Reflect** 反馈闭环 |
+| **前端** | 静态页 + Tab（**健康助手** \| 高级模式：档案/饮食 \| 历史）；类 Apple Health 信息层级 |
 
 ---
 
 ## 架构要点
 
-- **编排**：健康分析为 **Plan-and-Execute** 风格（`PlannerAgent` 后多 Specialist 串行）；饮食为 **多阶段流水线**（食物解析 → 营养师 → 教练 → 习惯），各阶段 **Pydantic** 校验与失败降级。
+- **编排**：对话入口由 `HealthAssistantOrchestrator` 按规则触发 Skill；报告分析为 **Plan-and-Execute** 风格多 Agent 串行；Swarm 并行 memory/RAG/trend。
+- **Harness**：`safety_guard` Skill 包装 `output_reviewer`，Eval Suite 见 `evals/safety_cases.json`，本地运行 `python backend/scripts/run_harness_eval.py`。
 - **工具**：饮食场景内 **Tool Use**（如营养查询、活动/睡眠摘要 Mock，可替换真实数据源）。
 - **LLM**：通过 `hello_agents.HelloAgentsLLM` 调用兼容 OpenAI 的 API；Agent 基类与业务流水线在本仓库 `backend/agents`、`backend/service` 中实现。
-- **记忆与 RAG**：历史报告、饮食与反馈等落在 **SQLite**；需要语义召回时，对记忆做 **向量索引（Milvus）**，按用户与场景检索相关片段并注入 Agent。Milvus 未开或不可用时 **自动回退** 为基于 SQL 的近期记忆列表。
+- **记忆与 RAG**：历史报告、饮食、对话与反馈等落在 **SQLite**；需要语义召回时，对记忆做 **向量索引（Milvus）**，按用户与场景检索相关片段并注入 Agent。Milvus 未开或不可用时 **自动回退** 为基于 SQL 的近期记忆列表。
 
 ---
 
@@ -54,11 +85,15 @@ HealthRecordAgent/
 ├── data/                    # 默认 SQLite：health_memory.db（可 .gitignore）
 ├── backend/
 │   ├── api/main.py          # FastAPI 入口
+│   ├── chat/                # orchestrator, swarm, report_context
+│   ├── skills/              # Skill 层
+│   ├── harness/             # 安全规则 + Eval Runner
 │   ├── agents/              # 报告分析各 Agent
-│   ├── service/             # health_analysis、diet_pipeline 等
+│   ├── service/             # health_analysis、diet_pipeline、trend_analysis
 │   ├── memory/              # SQLite 存取
 │   ├── rag/                 # 嵌入、Milvus、统一 retrieve
 │   └── tools/               # 饮食相关工具
+├── evals/                   # Harness 评测用例
 └── frontend/
     ├── index.html, app.js, style.css
     └── screenshots/         # README 界面截图（见「界面概览」）
@@ -133,8 +168,17 @@ python3 -m http.server 8080 --bind 127.0.0.1
 | POST | `/api/health/analysis/pdf` | 上传 PDF 分析 |
 | GET | `/api/health/task_status/{task_id}` | 任务与 Agent 状态 |
 | GET | `/api/health/users/{user_id}/report_history` | 用户历史报告 |
+| GET | `/api/health/users/{user_id}/trend_analysis` | 历史趋势与对比（Phase 4） |
 | GET | `/api/health/report_runs/{task_id}` | 单次运行详情 |
 | GET | `/api/health/report_runs/{task_id}/observability` | 可观测性摘要 |
+
+### 健康助手对话
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| POST | `/api/chat/sessions` | 创建会话 |
+| GET | `/api/chat/sessions/{session_id}/history` | 历史消息 |
+| POST | `/api/chat/sessions/{session_id}/messages` | 发送消息（SSE 流式；可 multipart 附件） |
 
 ### 饮食
 

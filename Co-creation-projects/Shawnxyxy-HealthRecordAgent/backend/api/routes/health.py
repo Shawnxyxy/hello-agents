@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field, field_validator
 from memory.store import get_report_run, list_report_runs_for_user
 from service.observability_views import build_report_observability
 from service.health_analysis import HealthAnalysisService
+from service.trend_analysis import TrendAnalysisService
 
 router = APIRouter()
 
@@ -105,3 +106,46 @@ async def report_run_observability(
     if not row:
         raise HTTPException(status_code=404, detail="未找到该次分析记录")
     return build_report_observability(row, include_raw_trace=include_raw_trace)
+
+
+@router.get("/health/users/{user_id}/trend_analysis")
+async def user_trend_analysis(user_id: str, period_days: int = 90):
+    """历史体检趋势分析（Phase 4）。"""
+    uid = user_id.strip()
+    if not uid:
+        raise HTTPException(status_code=400, detail="user_id 无效")
+    if period_days < 7 or period_days > 365:
+        raise HTTPException(status_code=400, detail="period_days 需在 7–365 之间")
+
+    svc = TrendAnalysisService()
+    trend = await asyncio.to_thread(svc.analyze_trends, uid, period_days)
+    comparisons = trend.comparison_data
+    progress = await asyncio.to_thread(svc.generate_progress_report, uid, trend)
+
+    from dataclasses import asdict
+
+    trend_dict = asdict(trend)
+    trend_dict["overall_trend"] = trend.overall_trend.value
+    comp_list = []
+    for c in comparisons:
+        d = asdict(c)
+        d["change_type"] = c.change_type.value
+        comp_list.append(d)
+
+    progress_summary = None
+    if progress:
+        progress_summary = {
+            "report_period": progress.report_period,
+            "total_reports": progress.total_reports,
+            "improved_indicators": progress.improved_indicators,
+            "worsened_indicators": progress.worsened_indicators,
+            "overall_health_score": progress.overall_health_score,
+        }
+
+    return {
+        "user_id": uid,
+        "period_days": period_days,
+        "trend": trend_dict,
+        "latest_comparison": comp_list,
+        "progress_summary": progress_summary,
+    }
