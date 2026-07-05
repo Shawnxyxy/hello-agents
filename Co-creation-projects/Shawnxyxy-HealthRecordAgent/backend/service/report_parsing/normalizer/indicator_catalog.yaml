@@ -1,0 +1,106 @@
+ldl_c:
+  display_name: 低密度脂蛋白
+  aliases: ["低密度脂蛋白", "LDL-C", "LDL", "低密度脂蛋白胆固醇"]
+  default_unit: "mmol/L"
+  plausible_range: [0.5, 15.0]
+
+hdl_c:
+  display_name: 高密度脂蛋白
+  aliases: ["高密度脂蛋白", "HDL-C", "HDL", "高密度脂蛋白胆固醇"]
+  default_unit: "mmol/L"
+  plausible_range: [0.3, 5.0]
+
+total_cholesterol:
+  display_name: 总胆固醇
+  aliases: ["总胆固醇", "TC", "CHOL"]
+  default_unit: "mmol/L"
+  plausible_range: [1.0, 20.0]
+
+triglyceride:
+  display_name: 甘油三酯
+  aliases: ["甘油三酯", "TG", "TRIG"]
+  default_unit: "mmol/L"
+  plausible_range: [0.2, 30.0]
+
+fasting_glucose:
+  display_name: 空腹血糖
+  aliases: ["空腹血糖", "FPG", "GLU", "葡萄糖", "血糖"]
+  default_unit: "mmol/L"
+  plausible_range: [2.0, 30.0]
+
+sbp:
+  display_name: 收缩压
+  aliases: ["收缩压", "SBP"]
+  default_unit: "mmHg"
+  plausible_range: [60, 260]
+
+dbp:
+  display_name: 舒张压
+  aliases: ["舒张压", "DBP"]
+  default_unit: "mmHg"
+  plausible_range: [30, 160]
+
+blood_pressure:
+  display_name: 血压
+  aliases: ["血压", "BP"]
+  split_pair: true
+
+heart_rate:
+  display_name: 心率
+  aliases: ["心率", "HR", "脉搏"]
+  default_unit: "次/分钟"
+  plausible_range: [30, 220]
+
+bmi:
+  display_name: BMI
+  aliases: ["BMI", "体重指数"]
+  default_unit: ""
+  plausible_range: [10, 60]
+
+alt:
+  display_name: ALT
+  aliases: ["ALT", "谷丙转氨酶", "丙氨酸氨基转移酶"]
+  default_unit: "U/L"
+  plausible_range: [1, 2000]
+
+ast:
+  display_name: AST
+  aliases: ["AST", "谷草转氨酶", "天门冬氨酸氨基转移酶"]
+  default_unit: "U/L"
+  plausible_range: [1, 2000]
+
+creatinine:
+  display_name: 肌酐
+  aliases: ["肌酐", "CREA", "Cr"]
+  default_unit: "μmol/L"
+  plausible_range: [20, 2000]
+
+height:
+  display_name: 身高
+  aliases: ["身高"]
+  default_unit: "cm"
+  plausible_range: [50, 250]
+
+weight:
+  display_name: 体重
+  aliases: ["体重"]
+  default_unit: "kg"
+  plausible_range: [20, 300]
+
+age:
+  display_name: 年龄
+  aliases: ["年龄"]
+  default_unit: "岁"
+  plausible_range: [0, 130]
+
+uric_acid:
+  display_name: 尿酸
+  aliases: ["尿酸", "UA"]
+  default_unit: "μmol/L"
+  plausible_range: [50, 1200]
+
+hemoglobin:
+  display_name: 血红蛋白
+  aliases: ["血红蛋白", "HGB", "Hb"]
+  default_unit: "g/L"
+  plausible_range: [50, 220]
