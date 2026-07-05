@@ -86,6 +86,7 @@ class HealthAssistantOrchestrator:
         *,
         report_text: Optional[str] = None,
         attachment_name: Optional[str] = None,
+        attachment_bytes: Optional[bytes] = None,
     ) -> AsyncIterator[str]:
         session = await asyncio.to_thread(get_chat_session, session_id)
         if not session or session["user_id"] != user_id:
@@ -93,7 +94,7 @@ class HealthAssistantOrchestrator:
             return
 
         user_content = message.strip()
-        if attachment_name and report_text:
+        if attachment_name and (report_text or attachment_bytes):
             user_content = user_content or f"[上传附件: {attachment_name}]"
 
         await asyncio.to_thread(
@@ -112,13 +113,15 @@ class HealthAssistantOrchestrator:
             report_text=report_text,
             attachment_name=attachment_name,
             last_report_task_id=session.get("last_report_task_id"),
+            extra={"attachment_bytes": attachment_bytes} if attachment_bytes else {},
         )
 
         skill_results: List[SkillResult] = []
         orchestrator_trace: List[Dict[str, Any]] = []
 
         report_result: Optional[SkillResult] = None
-        if report_text and report_text.strip():
+        has_report = bool((report_text and report_text.strip()) or attachment_bytes)
+        if has_report:
             async for item in _run_skill_with_live_progress(
                 registry["report_analysis"],
                 ctx,
@@ -134,6 +137,20 @@ class HealthAssistantOrchestrator:
                 orchestrator_trace.append(
                     {"skill": "report_analysis", "success": report_result.success}
                 )
+                parsed_payload = report_result.data.get("parsed_report")
+                if isinstance(parsed_payload, dict) and parsed_payload.get("quality"):
+                    q = parsed_payload["quality"]
+                    yield _sse(
+                        "parse_quality",
+                        {
+                            "overall_score": q.get("overall_score"),
+                            "indicator_count": q.get("indicator_count"),
+                            "low_confidence_count": q.get("low_confidence_count"),
+                            "degraded": q.get("degraded"),
+                            "extraction_method": q.get("extraction_method"),
+                            "warnings": (q.get("warnings") or [])[:3],
+                        },
+                    )
                 if report_result.success and report_result.data.get("task_id"):
                     await asyncio.to_thread(
                         touch_chat_session,
@@ -281,5 +298,10 @@ class HealthAssistantOrchestrator:
                 "message_id": msg_id,
                 "text": final_text,
                 "trace": orchestrator_trace,
+                "parse_quality": (
+                    report_result.data.get("parsed_report", {}).get("quality")
+                    if report_result and isinstance(report_result.data.get("parsed_report"), dict)
+                    else None
+                ),
             },
         )

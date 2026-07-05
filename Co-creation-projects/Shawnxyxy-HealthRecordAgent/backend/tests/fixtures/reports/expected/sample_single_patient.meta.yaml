@@ -1,0 +1,6 @@
+expected_canonical_codes:
+  - total_cholesterol
+  - fasting_glucose
+  - sbp
+  - dbp
+min_indicator_count: 6

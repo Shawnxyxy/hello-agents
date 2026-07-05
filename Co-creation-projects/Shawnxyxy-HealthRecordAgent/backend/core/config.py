@@ -44,6 +44,13 @@ class RAGConfig:
     embedding_api_key: Optional[str] = field(default_factory=lambda: os.getenv("EMBEDDING_API_KEY"))
     embedding_base_url: Optional[str] = field(default_factory=lambda: os.getenv("EMBEDDING_BASE_URL"))
     fallback_embedding_dim: int = field(default_factory=lambda: int(os.getenv("RAG_FALLBACK_EMBED_DIM", "64")))
+# ========== Report Parsing ==========
+@dataclass
+class ParseConfig:
+    ocr_enabled: bool = field(
+        default_factory=lambda: os.getenv("OCR_ENABLED", "false").lower() in ("1", "true", "yes")
+    )
+    ocr_max_pages: int = field(default_factory=lambda: int(os.getenv("OCR_MAX_PAGES", "5")))
 # ========== App ==========
 @dataclass
 class AppConfig:
@@ -58,6 +65,7 @@ class HealthAgentConfig:
     llm: LLMConfig = field(default_factory=LLMConfig)
     agent: AgentConfig = field(default_factory=AgentConfig)
     rag: RAGConfig = field(default_factory=RAGConfig)
+    parse: ParseConfig = field(default_factory=ParseConfig)
 
 # 全局配置
 _config = HealthAgentConfig()

@@ -327,6 +327,31 @@ html, body {
     color: var(--text-secondary);
 }
 
+.parse-quality-badge {
+    margin-top: 10px;
+    padding: 6px 10px;
+    border-radius: 8px;
+    font-size: 12px;
+    line-height: 1.4;
+    border: 1px solid var(--border);
+}
+
+.parse-quality-ok {
+    background: rgba(16, 163, 127, 0.1);
+    color: #0d8a6a;
+}
+
+.parse-quality-degraded {
+    background: rgba(224, 160, 0, 0.12);
+    color: #b8860b;
+}
+
+.parse-quality-warn {
+    margin-top: 6px;
+    font-size: 12px;
+    color: var(--text-secondary);
+}
+
 .chat-progress {
     text-align: center;
     padding: 8px 16px;

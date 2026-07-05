@@ -213,6 +213,7 @@ async function sendChatMessage(event) {
         assistantBody.innerHTML = '<p class="chat-typing">思考中…</p>';
     }
     let assistantText = "";
+    let parseQualityHtml = "";
 
     try {
         await ensureChatSession(userId);
@@ -251,16 +252,24 @@ async function sendChatMessage(event) {
                     setChatProgress(`${label}…`);
                 } else if (evt.event === "safety") {
                     setChatProgress("⚠️ 安全审查");
+                } else if (evt.event === "parse_quality") {
+                    parseQualityHtml = renderParseQualityBadge(evt.data);
+                    if (assistantBody && assistantText) {
+                        updateAssistantBody(assistantBody, assistantText, parseQualityHtml);
+                    }
                 } else if (evt.event === "token") {
                     assistantText += evt.data.text || "";
                     if (assistantBody) {
-                        assistantBody.innerHTML = `<div class="chat-markdown">${formatChatText(assistantText)}</div>`;
+                        updateAssistantBody(assistantBody, assistantText, parseQualityHtml);
                     }
                     scrollChatToBottom();
                 } else if (evt.event === "done") {
                     assistantText = evt.data.text || assistantText;
+                    if (evt.data.parse_quality) {
+                        parseQualityHtml = renderParseQualityBadge(evt.data.parse_quality);
+                    }
                     if (assistantBody) {
-                        assistantBody.innerHTML = `<div class="chat-markdown">${formatChatText(assistantText)}</div>`;
+                        updateAssistantBody(assistantBody, assistantText, parseQualityHtml);
                     }
                 } else if (evt.event === "error") {
                     if (!evt.data.skill) {
@@ -293,6 +302,25 @@ function escapeHtml(s) {
 
 function formatChatText(text) {
     return escapeHtml(text).replace(/\n/g, "<br>");
+}
+
+function renderParseQualityBadge(quality) {
+    if (!quality || quality.overall_score == null) return "";
+    const pct = Math.round(Number(quality.overall_score) * 100);
+    const count = quality.indicator_count ?? 0;
+    const cls = quality.degraded ? "parse-quality-degraded" : "parse-quality-ok";
+    let html = `<div class="parse-quality-badge ${cls}">📊 解析置信度 ${pct}% · 结构化 ${count} 项指标</div>`;
+    const warnings = quality.warnings || [];
+    if (warnings.length) {
+        html += `<div class="parse-quality-warn">${escapeHtml(warnings.slice(0, 2).join("；"))}</div>`;
+    }
+    return html;
+}
+
+function updateAssistantBody(assistantBody, text, parseQualityHtml) {
+    if (!assistantBody) return;
+    const main = `<div class="chat-markdown">${formatChatText(text)}</div>`;
+    assistantBody.innerHTML = main + (parseQualityHtml || "");
 }
 
 function autoResizeTextarea(el) {

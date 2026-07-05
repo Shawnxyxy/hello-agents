@@ -35,6 +35,7 @@ class HealthIndicator:
     risk_level: str = "low"
     analysis: str = ""
     timestamp: str = ""
+    canonical_code: Optional[str] = None
 
     def get_numeric_value(self) -> Optional[float]:
         """尝试获取数值型值"""

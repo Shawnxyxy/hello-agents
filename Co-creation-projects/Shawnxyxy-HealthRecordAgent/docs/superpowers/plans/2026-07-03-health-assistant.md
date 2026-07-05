@@ -1,5 +1,7 @@
 # 健康助手（对话主入口）Implementation Plan
 
+> **已归档：** 正式版本见 [`docs/archive/2026-07-03-health-assistant/02-implementation-plan.md`](../archive/2026-07-03-health-assistant/02-implementation-plan.md)
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task.
 
 **Goal:** 以「健康助手」对话为主入口，Skills-Agent 两层架构 + Harness 安全层，支持对话内上传体检报告。
@@ -25,10 +27,10 @@
 
 ## Phase 3 — Frontend ✅
 
-- [x] `frontend/index.html` — 健康助手 Tab 为主入口
+- [x] ChatGPT 式单页对话 + 左侧栏历史会话
 - [x] `frontend/chat.js` — SSE 客户端
 - [x] `frontend/style.css` — 对话样式
-- [x] `frontend/app.js` — Tab 路由更新
+- [x] `frontend/app.js` — 侧边栏与会话列表
 
 ## Phase 4 — Swarm + Trend + Eval ✅
 

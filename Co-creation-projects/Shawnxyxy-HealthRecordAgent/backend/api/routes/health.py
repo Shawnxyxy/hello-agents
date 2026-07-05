@@ -1,8 +1,6 @@
-from io import BytesIO
 from uuid import uuid4
 import asyncio
 
-import pdfplumber
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel, Field, field_validator
 
@@ -29,12 +27,24 @@ class HealthRequest(BaseModel):
 
 @router.post("/health/analysis")
 async def analysis_health(request: HealthRequest):
+    from service.report_parsing import ReportParsingPipeline
+    from service.report_parsing.errors import ParseError
+
     task_id = str(uuid4())
-
     service = HealthAnalysisService(task_id=task_id, user_id=request.user_id)
-    asyncio.create_task(service.run(request.report_text, request.user_id))
 
-    return {"task_id": task_id, "user_id": request.user_id}
+    try:
+        parsed = await ReportParsingPipeline().ingest_text_async(request.report_text)
+    except ParseError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    asyncio.create_task(service.run(parsed, request.user_id))
+
+    return {
+        "task_id": task_id,
+        "user_id": request.user_id,
+        "parse_quality": parsed.quality.model_dump(),
+    }
 
 
 @router.post("/health/analysis/pdf")
@@ -47,24 +57,56 @@ async def analysis_health_pdf(
         return {"error": "user_id 不能为空"}
 
     contents = await file.read()
-
-    text = ""
-
-    with pdfplumber.open(BytesIO(contents)) as pdf:
-        for page in pdf.pages:
-            page_text = page.extract_text()
-            if page_text:
-                text += page_text + "\n"
-
-    if not text.strip():
-        return {"error": "无法从PDF中提取文本"}
+    from service.report_parsing import ReportParsingPipeline
+    from service.report_parsing.errors import ParseError
 
     task_id = str(uuid4())
     service = HealthAnalysisService(task_id=task_id, user_id=uid)
 
-    asyncio.create_task(service.run(text, uid))
+    try:
+        parsed = await ReportParsingPipeline().ingest_bytes_async(contents, file.filename)
+    except ParseError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    return {"task_id": task_id, "user_id": uid}
+    asyncio.create_task(service.run(parsed, uid))
+
+    return {"task_id": task_id, "user_id": uid, "parse_quality": parsed.quality.model_dump()}
+
+
+class ParseTextRequest(BaseModel):
+    report_text: str = Field(..., min_length=1)
+
+
+@router.post("/health/parse")
+async def parse_report_text(body: ParseTextRequest, skip_llm: bool = True):
+    """仅解析报告，不跑 Agent 流水线（调试 / 预览）。"""
+    from service.report_parsing import ReportParsingPipeline
+    from service.report_parsing.errors import ParseError
+
+    try:
+        parsed = await ReportParsingPipeline().ingest_text_async(
+            body.report_text, skip_llm=skip_llm
+        )
+    except ParseError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return parsed.model_dump()
+
+
+@router.post("/health/parse/file")
+async def parse_report_file(file: UploadFile = File(...), skip_llm: bool = True):
+    """上传文件，仅返回 ParsedReport。"""
+    from service.report_parsing import ReportParsingPipeline
+    from service.report_parsing.errors import ParseError
+
+    contents = await file.read()
+    try:
+        parsed = await ReportParsingPipeline().ingest_bytes_async(
+            contents, file.filename, skip_llm=skip_llm
+        )
+    except ParseError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return parsed.model_dump()
+
 
 @router.get("/health/task_status/{task_id}")
 async def task_status(task_id: str):

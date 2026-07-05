@@ -1,4 +1,4 @@
-"""体检报告分析 Skill — 包装现有 HealthAnalysisService。"""
+"""体检报告分析 Skill — Parse → Analyze 两阶段。"""
 
 from __future__ import annotations
 
@@ -9,13 +9,16 @@ from uuid import uuid4
 
 from agents.base import get_task_status
 from service.health_analysis import HealthAnalysisService
+from service.report_parsing import ParsedReport, ReportParsingPipeline
+from service.report_parsing.errors import ParseError
 from skills.base import BaseSkill, ProgressCallback, SkillContext, SkillResult
 
 logger = logging.getLogger(__name__)
 
 AGENT_LABELS = {
+    "ReportParsing": "解析体检报告",
     "PlannerAgent": "规划分析步骤",
-    "HealthIndicatorAgent": "提取健康指标",
+    "HealthIndicatorAgent": "解读健康指标",
     "RiskAssessmentAgent": "评估健康风险",
     "AdviceAgent": "生成健康建议",
     "ReportAgent": "汇总分析报告",
@@ -23,7 +26,6 @@ AGENT_LABELS = {
 
 
 def _read_agent_state(agents: Dict[str, Any], agent_key: str) -> str:
-    """agents[name] 在 TASKS 中是字符串状态，兼容旧 dict 形态。"""
     raw = agents.get(agent_key)
     if isinstance(raw, str):
         return raw
@@ -33,7 +35,6 @@ def _read_agent_state(agents: Dict[str, Any], agent_key: str) -> str:
 
 
 def extract_report_inner(task_status: Dict[str, Any]) -> Dict[str, Any]:
-    """从 get_task_status() 结果解析 ReportAgent 产出的内层 report。"""
     raw = task_status.get("report")
     if not isinstance(raw, dict):
         return {}
@@ -43,8 +44,16 @@ def extract_report_inner(task_status: Dict[str, Any]) -> Dict[str, Any]:
     return raw
 
 
-def build_report_summary(inner: Dict[str, Any]) -> str:
+def build_report_summary(inner: Dict[str, Any], parse_quality: Optional[Dict[str, Any]] = None) -> str:
     parts: List[str] = []
+    if parse_quality:
+        score = parse_quality.get("overall_score")
+        count = parse_quality.get("indicator_count")
+        if score is not None:
+            parts.append(f"解析置信度 {float(score) * 100:.0f}%")
+        if count is not None:
+            parts.append(f"结构化指标 {count} 项")
+
     if inner.get("summary"):
         parts.append(str(inner["summary"])[:400])
 
@@ -54,24 +63,18 @@ def build_report_summary(inner: Dict[str, Any]) -> str:
 
     indicators = inner.get("indicator_section") or inner.get("indicators") or inner.get("indicator_results")
     if isinstance(indicators, list) and indicators:
-        parts.append(f"提取指标 {len(indicators)} 项")
-    elif isinstance(indicators, dict):
-        items = indicators.get("abnormal_items") or indicators.get("indicators")
-        if isinstance(items, list) and items:
-            parts.append(f"异常指标 {len(items)} 项")
+        parts.append(f"分析指标 {len(indicators)} 项")
 
     advice = inner.get("advice_section") or inner.get("advice")
     if isinstance(advice, list) and advice:
         parts.append(f"健康建议 {len(advice)} 条")
-    elif isinstance(advice, dict) and advice.get("summary"):
-        parts.append(str(advice["summary"])[:300])
 
     return "；".join(parts) if parts else "体检报告分析已完成，详见结构化结果。"
 
 
 class ReportAnalysisSkill(BaseSkill):
     skill_id = "report_analysis"
-    description = "解析并分析用户上传的体检报告（文本或 PDF 提取文本），输出结构化解读与建议。"
+    description = "解析并分析用户上传的体检报告（文本或 PDF），输出结构化解读与建议。"
 
     async def run(
         self,
@@ -79,7 +82,10 @@ class ReportAnalysisSkill(BaseSkill):
         on_progress: Optional[ProgressCallback] = None,
     ) -> SkillResult:
         report_text = (ctx.report_text or "").strip()
-        if not report_text:
+        file_bytes = ctx.extra.get("attachment_bytes")
+        filename = ctx.attachment_name
+
+        if not report_text and not file_bytes:
             return SkillResult(
                 skill_id=self.skill_id,
                 success=False,
@@ -87,14 +93,71 @@ class ReportAnalysisSkill(BaseSkill):
                 trace=[{"error": "empty_report_text"}],
             )
 
+        trace: list[Dict[str, Any]] = []
+        parsed: Optional[ParsedReport] = ctx.extra.get("parsed_report")
+        if isinstance(parsed, dict):
+            parsed = ParsedReport.model_validate(parsed)
+
+        if parsed is None:
+            if on_progress:
+                on_progress(
+                    "skill_progress",
+                    {
+                        "skill": self.skill_id,
+                        "stage": "ReportParsing",
+                        "label": AGENT_LABELS["ReportParsing"],
+                        "status": "running",
+                    },
+                )
+            pipeline = ReportParsingPipeline()
+            try:
+                if file_bytes:
+                    parsed = await pipeline.ingest_bytes_async(file_bytes, filename)
+                else:
+                    parsed = await pipeline.ingest_text_async(report_text, filename or "report.txt")
+            except ParseError as exc:
+                return SkillResult(
+                    skill_id=self.skill_id,
+                    success=False,
+                    summary=str(exc),
+                    trace=[{"stage": "ReportParsing", "error": exc.code.value}],
+                )
+            trace.append(
+                {
+                    "stage": "ReportParsing",
+                    "status": "completed",
+                    "indicator_count": parsed.quality.indicator_count,
+                    "quality_score": parsed.quality.overall_score,
+                }
+            )
+            if on_progress:
+                on_progress(
+                    "skill_progress",
+                    {
+                        "skill": self.skill_id,
+                        "stage": "ReportParsing",
+                        "label": AGENT_LABELS["ReportParsing"],
+                        "status": "completed",
+                    },
+                )
+
+        if parsed.quality.indicator_count == 0 and parsed.quality.degraded:
+            return SkillResult(
+                skill_id=self.skill_id,
+                success=False,
+                summary="未能从报告中识别到有效指标，请检查文件格式或换用文字版报告。",
+                data={"parsed_report": parsed.model_dump()},
+                trace=trace,
+                degraded=True,
+            )
+
         task_id = str(uuid4())
         service = HealthAnalysisService(task_id=task_id, user_id=ctx.user_id)
-        trace: list[Dict[str, Any]] = []
         seen_running: set[str] = set()
         seen_completed: set[str] = set()
 
         async def _run_pipeline() -> None:
-            await service.run(report_text, ctx.user_id)
+            await service.run(parsed, ctx.user_id)
 
         pipeline_task = asyncio.create_task(_run_pipeline())
 
@@ -102,6 +165,8 @@ class ReportAnalysisSkill(BaseSkill):
             status = get_task_status(task_id) or {}
             agents = status.get("agents") or {}
             for agent_key, label in AGENT_LABELS.items():
+                if agent_key == "ReportParsing":
+                    continue
                 state = _read_agent_state(agents, agent_key)
                 if state == "running" and agent_key not in seen_running:
                     seen_running.add(agent_key)
@@ -141,19 +206,24 @@ class ReportAnalysisSkill(BaseSkill):
             return SkillResult(
                 skill_id=self.skill_id,
                 success=False,
-                data={"task_id": task_id},
+                data={"task_id": task_id, "parsed_report": parsed.model_dump()},
                 summary="体检报告分析失败，请稍后重试。",
                 trace=trace + [{"error": str(pipeline_task.exception())}],
                 degraded=True,
             )
 
-        summary = build_report_summary(inner)
+        summary = build_report_summary(inner, parsed.quality.model_dump())
 
         return SkillResult(
             skill_id=self.skill_id,
             success=success,
-            data={"task_id": task_id, "report": task_report, "report_inner": inner},
+            data={
+                "task_id": task_id,
+                "report": task_report,
+                "report_inner": inner,
+                "parsed_report": parsed.model_dump(),
+            },
             summary=summary,
             trace=trace,
-            degraded=not success,
+            degraded=not success or parsed.quality.degraded,
         )

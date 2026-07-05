@@ -141,6 +141,8 @@ class TrendAnalysisService:
             or (raw.get("indicator_results") or {}).get("indicators")
             or (inner.get("indicator_results") or {}).get("indicators")
         )
+        if isinstance(candidates, dict) and isinstance(candidates.get("indicators"), list):
+            candidates = candidates["indicators"]
         if not isinstance(candidates, list):
             return indicators
         for ind in candidates:
@@ -153,7 +155,7 @@ class TrendAnalysisService:
                 status = IndicatorStatus.BORDERLINE
             indicators.append(
                 HealthIndicator(
-                    name=ind.get("name", ind.get("indicator_name", "未知指标")),
+                    name=ind.get("name", ind.get("indicator_name", ind.get("display_name", "未知指标"))),
                     value=ind.get("value", ind.get("result")),
                     normalized_value=ind.get("normalized_value"),
                     unit=ind.get("unit", ""),
@@ -161,6 +163,7 @@ class TrendAnalysisService:
                     risk_level=ind.get("risk_level", "low"),
                     analysis=str(ind.get("analysis", "")),
                     timestamp=created_at,
+                    canonical_code=ind.get("canonical_code"),
                 )
             )
         return indicators
@@ -202,8 +205,9 @@ class TrendAnalysisService:
 
         # 对比相同名称的指标
         for current_indicator in current_report.indicators:
-            indicator_name = current_indicator.name
-            previous_indicator = self._find_indicator_by_name(previous_report.indicators, indicator_name)
+            previous_indicator = self._find_matching_indicator(
+                previous_report.indicators, current_indicator
+            )
 
             if previous_indicator:
                 comparison = self._compare_indicators(current_indicator, previous_indicator)
@@ -213,12 +217,23 @@ class TrendAnalysisService:
         return comparisons
 
     def _find_indicator_by_name(self, indicators: List[HealthIndicator], name: str) -> Optional[HealthIndicator]:
-        """按名称查找指标"""
-        # 简单的名称匹配，后续可以改进为模糊匹配
+        """按 canonical_code 或名称查找指标。"""
+        for ind in indicators:
+            if ind.canonical_code and name and ind.canonical_code == name:
+                return ind
         for ind in indicators:
             if name in ind.name or ind.name in name:
                 return ind
         return None
+
+    def _find_matching_indicator(
+        self, indicators: List[HealthIndicator], current: HealthIndicator
+    ) -> Optional[HealthIndicator]:
+        if current.canonical_code:
+            for ind in indicators:
+                if ind.canonical_code == current.canonical_code:
+                    return ind
+        return self._find_indicator_by_name(indicators, current.name)
 
     def _compare_indicators(self, current: HealthIndicator, previous: HealthIndicator) -> Optional[IndicatorComparison]:
         """对比两个指标"""

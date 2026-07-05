@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi import HTTPException
@@ -82,8 +82,6 @@ def test_extract_attachment_pdf_error():
     f.filename = "bad.pdf"
     f.read = AsyncMock(return_value=b"not-a-pdf")
 
-    with patch("api.routes.chat.pdfplumber.open", side_effect=Exception("corrupt")):
-        with pytest.raises(HTTPException) as exc:
-            asyncio.run(_extract_attachment_text(f))
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(_extract_attachment_text(f))
     assert exc.value.status_code == 400
-    assert "PDF" in exc.value.detail

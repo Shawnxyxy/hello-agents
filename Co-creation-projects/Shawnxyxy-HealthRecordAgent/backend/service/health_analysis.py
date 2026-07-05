@@ -5,7 +5,7 @@
 
 import asyncio
 import logging
-from typing import Dict, Any
+from typing import Any, Dict, Union
 from uuid import uuid4
 
 from agents.planner import PlannerAgent
@@ -17,8 +17,20 @@ from agents.base import create_task, update_agent_state, complete_task
 from memory.store import save_completed_report_run
 from rag.indexers import index_report_run
 from rag.retriever import retrieve
+from service.report_parsing.schemas import ParsedReport
 
 logger = logging.getLogger(__name__)
+
+
+def _indicator_list_from_agent_result(indicator_result: Any) -> list[Dict[str, Any]]:
+    """HealthIndicatorAgent 返回 {"indicators": [...]}，ReportAgent 需要 list。"""
+    if isinstance(indicator_result, list):
+        return indicator_result
+    if isinstance(indicator_result, dict):
+        items = indicator_result.get("indicators")
+        if isinstance(items, list):
+            return items
+    return []
 
 
 class HealthAnalysisService:
@@ -52,10 +64,20 @@ class HealthAnalysisService:
                 out[name] = []
         return out
 
-    async def run(self, report_text: str, user_id: str) -> Dict[str, Any]:
+    async def run(self, report_input: Union[str, ParsedReport], user_id: str) -> Dict[str, Any]:
         """
-        执行完整的健康分析流程
+        执行完整的健康分析流程。
+        report_input: 纯文本（legacy）或 ParsedReport（解析流水线输出）。
         """
+        parsed_meta: Dict[str, Any] | None = None
+        pre_parsed: list[Dict[str, Any]] | None = None
+
+        if isinstance(report_input, ParsedReport):
+            report_text = report_input.artifact.raw_text
+            pre_parsed = report_input.to_agent_indicators()
+            parsed_meta = report_input.model_dump()
+        else:
+            report_text = str(report_input)
 
         # 1.任务规划
         update_agent_state(self.task_id, "PlannerAgent", "running")
@@ -66,7 +88,8 @@ class HealthAnalysisService:
         update_agent_state(self.task_id, "HealthIndicatorAgent", "running")
         indicator_result = await self.indicator_agent.run({
             "report_text": report_text,
-            "plan": plan_result
+            "plan": plan_result,
+            "pre_parsed_indicators": pre_parsed,
         })
         update_agent_state(self.task_id, "HealthIndicatorAgent", "completed", partial_report={"indicator_results": indicator_result})
 
@@ -100,11 +123,19 @@ class HealthAnalysisService:
         # 5. 报告汇总
         update_agent_state(self.task_id, "ReportAgent", "running")
         final_report = await self.report_agent.run({
-            "indicators": indicator_result,
+            "indicators": _indicator_list_from_agent_result(indicator_result),
             "risk_assessment": risk_result,
             "advice": advice_result,
             "retrieved_memory": retrieved_memory,
         })
+        if parsed_meta:
+            inner = final_report.get("report") if isinstance(final_report.get("report"), dict) else final_report
+            if isinstance(inner, dict):
+                inner["parsed_report_meta"] = {
+                    "schema_version": parsed_meta.get("schema_version"),
+                    "quality": parsed_meta.get("quality"),
+                    "raw_text_hash": parsed_meta.get("raw_text_hash"),
+                }
         update_agent_state(self.task_id, "ReportAgent", "completed")
         complete_task(self.task_id, final_report)
 

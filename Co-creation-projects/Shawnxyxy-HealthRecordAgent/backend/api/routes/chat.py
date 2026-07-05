@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 import logging
-from io import BytesIO
 from uuid import uuid4
 
-import pdfplumber
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, field_validator
@@ -85,41 +83,50 @@ async def user_recent_chat_messages(user_id: str, limit: int = 40):
     return {"user_id": uid, "items": items}
 
 
-async def _extract_attachment_text(file: UploadFile | None) -> tuple[str | None, str | None]:
+async def _read_attachment(file: UploadFile | None) -> tuple[str | None, str | None, bytes | None]:
+    """返回 (report_text 预览, filename, raw_bytes)。"""
     if not file or not file.filename:
-        return None, None
+        return None, None, None
     name = file.filename
     contents = await file.read()
     if len(contents) > MAX_ATTACHMENT_BYTES:
         raise HTTPException(status_code=413, detail="附件过大，请上传 10MB 以内的文件")
     if not contents:
-        return None, name
+        return None, name, None
+
+    if contents[:4] == b"%PDF":
+        return None, name, contents
 
     lower = name.lower()
     if lower.endswith(".txt"):
         for enc in ("utf-8", "gbk", "latin-1"):
             try:
-                return contents.decode(enc), name
+                return contents.decode(enc), name, contents
             except UnicodeDecodeError:
                 continue
-        return contents.decode("utf-8", errors="replace"), name
+        return contents.decode("utf-8", errors="replace"), name, contents
 
     if lower.endswith(".pdf"):
-        try:
-            text = ""
-            with pdfplumber.open(BytesIO(contents)) as pdf:
-                for page in pdf.pages:
-                    page_text = page.extract_text()
-                    if page_text:
-                        text += page_text + "\n"
-        except Exception as exc:
-            logger.exception("PDF 解析失败: %s", exc)
-            raise HTTPException(status_code=400, detail="无法解析 PDF，请确认文件未损坏或改用 .txt") from exc
-        if not text.strip():
-            raise HTTPException(status_code=400, detail="无法从 PDF 中提取文本")
-        return text.strip(), name
+        return None, name, contents
 
     raise HTTPException(status_code=400, detail="仅支持 .pdf 或 .txt 附件")
+
+
+async def _extract_attachment_text(file: UploadFile | None) -> tuple[str | None, str | None]:
+    """兼容旧测试：通过 ReportParsingPipeline 提取文本预览。"""
+    text, name, raw = await _read_attachment(file)
+    if not raw or not name:
+        return text, name
+    if text:
+        return text, name
+    from service.report_parsing import ReportParsingPipeline
+    from service.report_parsing.errors import ParseError
+
+    try:
+        parsed = await ReportParsingPipeline().ingest_bytes_async(raw, name, skip_llm=True)
+        return parsed.artifact.raw_text, name
+    except ParseError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.post("/chat/sessions/{session_id}/messages")
@@ -139,8 +146,8 @@ async def send_message(
     if row["user_id"] != uid:
         raise HTTPException(status_code=403, detail="user_id 不匹配")
 
-    report_text, attachment_name = await _extract_attachment_text(file)
-    if not message.strip() and not report_text:
+    report_text, attachment_name, attachment_bytes = await _read_attachment(file)
+    if not message.strip() and not report_text and not attachment_bytes:
         raise HTTPException(status_code=400, detail="请输入消息或上传体检报告")
 
     orchestrator = HealthAssistantOrchestrator()
@@ -152,6 +159,7 @@ async def send_message(
             message,
             report_text=report_text,
             attachment_name=attachment_name,
+            attachment_bytes=attachment_bytes,
         ):
             yield chunk
 

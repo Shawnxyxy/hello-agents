@@ -1,5 +1,7 @@
 # 健康助手（对话主入口）设计规格
 
+> **已归档：** 正式版本见 [`docs/archive/2026-07-03-health-assistant/01-design-spec.md`](../archive/2026-07-03-health-assistant/01-design-spec.md)
+
 **日期:** 2026-07-03  
 **目标:** 将 HealthRecordAgent 升级为 Skills-Agent 两层架构 + Harness Engineering，以对话为主入口，支持对话内上传体检报告。
 
